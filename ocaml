@@ -1,0 +1,569 @@
+#load "graphics.cma";;
+#load "unix.cma";;
+open Graphics;;
+(*Règles du jeu (inspiré grandement du Jezzball) :
+Des balles (leur nombre augmente avec le niveau) rebondissent sur une zone de
+#> jeu rectangulaire. Le joueur avance au niveau suivant en enfermant les balles
+#> dans des espaces de plus en plus petits, jusqu'à ce qu'au moins 75% de la
+#> surface de la zone de jeu soit inaccessible aux balles. Pour enfermer les
+#> balles, le joueur peut tracer des droites verticales ou horizontales partant du
+#> point curseur et s'étendant avec une vitesse uniforme des deux côtés
+#> jusqu'à atteindre un bord. Si un tracé touche une balle durant son
+#> étalement, le joueur perd.
+Il n'y a en soit pas de "Victoire" possible hormis compléter le maximum de
+#> niveau, le jezzball originel contient aussi une limite de temps pour compléter
+#> le niveau et donne 3 vies au joueur mais cela n'a pas été considéré ici :
+#> le joueur a tout le temps qu'il lui faut pour compléter un niveau mais n'a en
+#> revanche qu'une seule vie pour y arriver.*)
+
+(*Deux versions de la fonction qui permet d'attendre un certain temps : une
+#> version avec le module Sys (qui prend en entrée x en seconde) et une version
+#> avec le module Unix (qui prend en entrée x en milisecondes). J'ai d'abord
+#> utilisé la versions Sys.time mais en voulant réduire x à quelques
+#> milisecondes des tests ont révélés que la fonction était moins précise (x
+#> s'approche sans doute trop de la durée de certaines opérations). Néanmoins
+#> en testant celle de Unix, j'ai remarqué qu'elle permettait d'avoir un
+#> intervalle de fiabilité un peu plus grand dans la mesure où elle est encore
+#> utilisable pour x de l'ordre de quelques milisecondes, ce qui suffit pour
+#> l'utilisation du programme dans la suite.*)
+
+let attend x =
+   let temps = Sys.time () in
+      while Sys.time () < temps +. x do () done;;
+let attend milli =
+   let sec = milli /. 1000. in
+      let tm1 = Unix.gettimeofday () in
+         while Unix.gettimeofday () -. tm1 < sec do () done;;
+
+(*Initialise les positions des balles*)
+let array_positions n = let array = Array.make (n) (0, 0) in
+      for i = 0 to (n - 1) do array.(i) <- (Random.int (size_x ()), Random.int (size_y ()))
+      done; array;;
+
+(* Initialise les vitesses des balles*)
+let array_vitesse n vitesse = Array.make (n) (vitesse);;
+
+(* Initialise la taille de la fenêtre contenant la balle.
+Dans toute la suite j'appelle "size" une telle fenêtre, constituée de deux
+#> couples de coordonnées sizex et sizey, regroupés dans des array listesizex et
+#> listesizey. listesizex.(i) et listesizey.(i) donnent donc les coordonnées
+#> limitant la size de la (i+1)-ème balle*)
+let array_sizex n = Array.make (n) (0, (size_x ()));;
+let array_sizey n = Array.make (n) (0, (size_y ()));;
+
+(* Donne les nouvelles pos/vit d'une balle en fct des anciennes et d'un potentiel rebond*)
+let calcul_balle (x, y) (dx, dy) (sizex) (sizey) =
+   let nx1 = x + dx and ny1 = y + dy
+   and ndx = ref dx and ndy = ref dy
+   in
+      (if (nx1 < fst (sizex)) || (nx1 >= snd (sizex)) then ndx := - dx);
+      (if (ny1 < fst (sizey)) || (ny1 >= snd (sizey)) then ndy := - dy);
+      ((x + !ndx, y + !ndy), (!ndx, !ndy));;
+
+(* fonction allégée donnant seulement la nouvelle position potentielle, qui
+#> sera utilisé plus tard pour prévoir s'il y a choc avec un tracé*)
+let calcul_testfail (x, y) (dx, dy) (sizex) (sizey) =
+   let nx1 = x + dx and ny1 = y + dy in (nx1, ny1);;
+
+
+(* Deplace une balle grâce à la nouvelle vit/pos*)
+let deplace_balle pos speed sizex sizey =
+   let (x, y) = pos in
+      let mem = ref (x, y) in
+         let ((nx, ny), n_speed) = calcul_balle (x, y) speed sizex sizey
+         and old_mem = !mem in
+            mem := (nx, ny);
+            set_color white; (* le déplacement est simulé par un
+#> effacement de l'ancien disque et le fill d'un nouveau*)
+            fill_circle (fst (old_mem)) (snd (old_mem)) 5;
+            set_color (black);
+            fill_circle nx ny 5;;
+
+(* Deplace toutes les balles d'un "tic" sans prise en compte d'action du joueur*)
+let rebonds3 n listepos listevit listesizex listesizey =
+   for i = 0 to (n - 1) do
+      deplace_balle (listepos.(i)) (listevit.(i)) (listesizex.(i)) (listesizey.(i));
+      let calc = calcul_balle (listepos.(i)) (listevit.(i)) (listesizex.(i)) (listesizey.(i)) in
+         listepos.(i) <- fst (calc);
+         listevit.(i) <- snd (calc);
+   done;;
+
+(* Deplace toutes les balles d'un "tic" en cas de commande de tracé vertical du
+#> joueur au point (xnew,ynew)*)
+let rebonds3_NX n listepos listevit listesizex listesizey xnew ynew =
+   for i = 0 to (n - 1) do
+      let sizex = listesizex.(i) and sizey = listesizey.(i) in
+         deplace_balle (listepos.(i)) (listevit.(i)) sizex sizey; (*déplacement*)
+         if fst (listepos.(i)) < xnew && xnew < snd (sizex) &&
+            ynew < snd (sizey) && ynew > fst (sizey) (*suivant le cas de figure, on attribue à
+#> chaque fenêtre de balle sa nouvelle taille*)
+         then let nsizex = (fst (sizex), xnew - 5) in begin
+                  let calc = calcul_balle (listepos.(i)) (listevit.(i)) (nsizex) (sizey) in
+                     listepos.(i) <- fst (calc);
+                     listevit.(i) <- snd (calc);
+                     listesizex.(i) <- nsizex; end
+         else if fst (listepos.(i)) > xnew && xnew > fst (sizex) && ynew < snd (sizey) && ynew > fst (sizey)
+         then begin let nsizex = (xnew + 15, snd (sizex)) in begin
+                     let calc = calcul_balle (listepos.(i)) (listevit.(i)) (nsizex) (sizey) in
+                        listepos.(i) <- fst (calc);
+                        listevit.(i) <- snd (calc);
+                        listesizex.(i) <- nsizex; end end
+         else
+            let calc = calcul_balle (listepos.(i)) (listevit.(i)) (sizex) (sizey) in
+               listepos.(i) <- fst (calc);
+               listevit.(i) <- snd (calc);
+   done;;
+
+(* Deplace toutes les balles d'un "tic" en cas de commande de tracé horizontal
+#> de  la part du joueur au point (xnew,ynew)*)
+let rebonds3_NY n listepos listevit listesizex listesizey xnew ynew =
+   for i = 0 to (n - 1) do
+      let sizex = listesizex.(i) and sizey = listesizey.(i) in
+         deplace_balle (listepos.(i)) (listevit.(i)) sizex sizey;
+         (* même chose que pour le programme rebonds_NewX en adaptant les cas*)
+         if snd (listepos.(i)) < ynew && ynew < snd (sizey) && xnew < snd (sizex) && xnew > fst (sizex)
+         then let nsizey = (fst (sizey), ynew - 5) in begin
+                  let calc = calcul_balle (listepos.(i)) (listevit.(i)) (sizex) (nsizey) in
+                     listepos.(i) <- fst (calc);
+                     listevit.(i) <- snd (calc);
+                     listesizey.(i) <- (nsizey) end
+         else if snd (listepos.(i)) > ynew && ynew > fst (sizey) && xnew < snd (sizex) && xnew > fst (sizex)
+         then begin let nsizey = (ynew + 15, snd (sizey)) in begin
+                     let calc = calcul_balle (listepos.(i)) (listevit.(i)) (sizex) (nsizey) in
+                        listepos.(i) <- fst (calc);
+                        listevit.(i) <- snd (calc);
+                        listesizey.(i) <- (nsizey); end end
+         else
+            let calc = calcul_balle (listepos.(i)) (listevit.(i)) (sizex) (sizey) in
+               listepos.(i) <- fst (calc);
+               listevit.(i) <- snd (calc);
+   done;;
+
+
+let trace_horizontal x1 y1 j =
+   set_color (black);
+   fill_rect (x1 + (10 * (!j))) (y1) (10) (10);
+   fill_rect (x1 - (10 * (!j))) (y1) (10) (10);;
+
+let trace_vertical x1 y1 j =
+   set_color (black);
+   fill_rect (x1) (y1 + (10 * (!j))) (10) (10);
+   fill_rect (x1) (y1 - (10 * (!j))) (10) (10);;
+
+let max a b = if a > b then a else b;;
+
+(*Donne deux Arrays à partir d'une Array contenant des couples*)
+let intintArray a =
+   let n = Array.length (a) in
+      let b = Array.make (n) (0) and c = Array.make (n) (0) in
+         for i = 0 to (n - 1) do b.(i) <- fst (a.(i)); c.(i) <- snd (a.(i)) done; (b, c);;
+
+(* Donne le minimum d'une Array*)
+let min_array array = let n = Array.length (array) in
+      let rec aux accu k = match k with
+         | (- 1) -> accu
+         | k -> if array.(k) < accu then aux (array.(k)) (k - 1) else aux accu (k - 1)
+      in aux (array.((n - 1))) (n - 1);;
+
+(* Pareil pour le maximum*)
+let max_array array = let n = Array.length (array) in
+      let rec aux accu k = match k with
+         | (- 1) -> accu
+         | k -> if array.(k) > accu then aux (array.(k)) (k - 1) else aux accu (k - 1)
+      in aux (array.((n - 1))) (n - 1);;
+
+(* Noircit les bords inutilisables par le joueur. J'ai volontairement choisi de
+#> noircir les bords, pour permettre une meilleur visibilité de l'état de la
+#> partie, sans pour autant noircir toute surface inutilisable. En particulier
+#> pour les surfaces se situant entre plusieurs size de balles différentes, j'ai
+#> testé une implémentation d'un noircissement de ces interstices à travers un
+#> noircissement de tout sauf des size, mais cela est trop lourd pour l'effectuer
+#> à chaque itération. Pour alléger le programme, j'ai limité le noircissement
+#> aux extrêmes (qui représentent souvent la majeure partie des surfaces
+#> inutilisables), ce qui donne une bonne visibilité, tout en prenant en compte
+#> les surfaces gagnées entre plusieurs size dans la condition de gain d'une
+#> partie. Les règles du jeu restent donc les même, mais les interstices des
+#> size resterons blanche et délimité par des tracés mais non noircies.*)
+let bords listesizex listesizey =
+   let fstsizex, sndsizex = (intintArray listesizex) and fstsizey, sndsizey = (intintArray listesizey) in
+      let min_fstsizex = min_array (fstsizex) and min_fstsizey =
+         min_array (fstsizey) and max_sndsizex = max_array (sndsizex) and
+      max_sndsizey = max_array (sndsizey) in
+         set_color (black);
+         fill_rect (0) (0) (max (min_fstsizex - 15) (0)) (size_y ());
+         fill_rect (0) (0) (size_x ()) (max (min_fstsizey - 15) (0));
+         fill_rect (0) (max_sndsizey + 15) (size_x ()) (size_y ());
+         fill_rect (max_sndsizex + 15) (0) (size_x () - max_sndsizex) (size_y ());;
+
+
+(*J'ai commencé par passer les array en liste puis à nouveau en array quand il
+#> s'agissait de les trier ou de filtrer les doublons, ce qui me permettait
+#> d'utiliser des programmes de tri récursifs qu'on connaissait déjà plutôt
+#> que de les adapter pour trier sur les array directement. Comme les tests ont
+#> montré que ce chemin, malgré qu'il ne soit pas optimal, n'impacte en rien la
+#> fluidité du jeu j'ai décidé de laisser comme tel, plutôt que d'optimiser le
+#> tri/supression de doublons en sachant que les gains ne seront pas visibles*)
+let listetoarray liste = let array = Array.make (List.length (liste))
+      (List.hd (liste)) in let rec aux accu liste = match liste with
+         | [] -> array
+         | h :: t -> array.(accu) <- h; aux (accu + 1) (t)
+      in aux 0 liste;;
+
+(*Noircit tout sauf les size, peut remplacer la fonctions bords dans le
+#> programme balles3_rebons (par défaut c'est bien la fonctions bords qui est
+#> utilisée) mais le gain de visibilité est négligeable et les problèmes liés
+#> à une telle fonction sont multiples.
+-Les tracés déjà effectués ne seront plus visibles comme des tracés mais
+#> simplement noircit du fait du noircissement total.
+-Suivant la vitesse d'exécution, un clignotement permanent peut être remarqué
+#> du fait du fill de noir à chaque appel*)
+let fill_toutsaufsize listesizex listesizey =
+   let listesize = listetoarray (liste_sans_doublons (arraytoliste (recoupler listesizex listesizey))) in
+      set_color (black);
+      fill_rect 0 0 (size_x ()) (size_y ());
+      set_color (white);
+      for i = 0 to (Array.length (listesize) - 1) do
+         fill_rect (fst (fst (listesize.(i)))) (fst (snd (listesize.(i)))) (taillex
+            (listesize) (i)) (tailley (listesize) (i))
+      done;;
+
+
+(* Détermine la plus petite fenêtre contenant le clic du joueur*)
+let quellesize x1 y1 listesizex listesizey =
+   let j = ref ((size_x (), 0), (size_y (), 0)) in
+      for i = 0 to (Array.length (listesizex) - 1) do
+         let sizex0, sizex1 = listesizex.(i) and sizey0, sizey1 = listesizey.(i) in
+            if x1 >= sizex0 && x1 <= sizex1 && y1 >= sizey0 && y1 <= sizey1 && (!j
+               = ((size_x (), 0), (size_y (), 0)) || (sizex0 >= fst (fst (!j)) &&
+               sizex1 <= snd (fst (!j)) && sizey0 >= fst (snd (!j)) && sizey1 <= snd (snd (!j))))
+            then j := (sizex0, sizex1), (sizey0, sizey1) done;
+      !j;;
+
+(* Les fonctions fail déterminent si le joueur a raté un coup, qui
+#> entrainerait un contact entre une balle et un tracé en cours. C'est la
+#> condition de défaite.*)
+
+let est_concerne listesizex listesizey i w = (*détermine si la vérification de
+#> collision concerne la balle d'indice i*)
+   let ffw = fst (fst (w)) and fsw = fst (snd (w)) and sfw = snd (fst (w)) and ssw = snd (snd (w))
+   and fx = fst (listesizex.(i)) and sx = snd (listesizex.(i)) and
+   fy = fst (listesizey.(i)) and sy = snd (listesizey.(i)) in
+      fx = ffw || fx = sfw || sx = ffw || sx = sfw || fy = fsw || fy = ssw || sy = fsw || sy = ssw;;
+
+let failY n x1 y1 j listepos listevit listesizex listesizey =
+   let w = quellesize x1 y1 listesizex listesizey (*permet de considérer
+#> uniquement les balles dont le tracé concerne la size et d'éviter des fail
+#> injustifiés*) and vraiesize = ref false in
+      if w != ((size_x (), 0), (size_y (), 0)) then vraiesize := true; (*permet de mettre
+#> de côté le cas d'initialisation du programme quellesize, i.e quand aucun
+#> tracé n'a encore été effectué*)
+      for i = 0 to (n - 1) do
+         let x, y = listepos.(i) and nx, ny = calcul_testfail (listepos.(i))
+            (listevit.(i)) (listesizex.(i)) (listesizey.(i)) in
+            if ny + 10 >= y1 && ny - 10 <= y1 + 10 then
+               if (nx + 5 >= x1 + 10 * (!j) && nx - 5 <= (x1 + 10 * (!j))) || (nx + 5 >= x1 - 10 * (!j)
+                  && nx - 5 <= (x1 - 10 * (!j))) then
+                  if !vraiesize then begin if est_concerne listesizex listesizey i w then begin
+                              set_color (red);
+                              fill_circle (x) (y) (7); failwith "Contact avec le tracé horizontal" end end
+                  else begin
+                        set_color (red);
+                        fill_circle (x) (y) (7); failwith "Contact avec le tracé horizontal" end
+      done;;
+
+let failX n x1 y1 j listepos listevit listesizex listesizey = (* même chose que pour failY *)
+   let w = quellesize x1 y1 listesizex listesizey and vraiesize = ref false in
+      if w != ((size_x (), 0), (size_y (), 0)) then vraiesize := true;
+      for i = 0 to (n - 1) do
+         let x, y = listepos.(i) and nx, ny = calcul_testfail (listepos.(i))
+            (listevit.(i)) (listesizex.(i)) (listesizey.(i)) in
+            if nx + 10 >= x1 && nx - 10 <= x1 + 10 then
+               if (ny + 5 >= y1 + 10 * (!j) && ny - 5 <= (y1 + 10 * (!j))) ||
+                  (ny + 5 >= y1 - 10 * (!j) && ny - 5 <= (y1 - 10 * (!j))) then
+                  if !vraiesize then begin if est_concerne listesizex listesizey i w then begin
+                              set_color (red);
+                              fill_circle (x) (y) (7); failwith "Contact avec le tracé vertical" end end
+                  else begin
+                        set_color (red);
+                        fill_circle (x) (y) (7); failwith "Contact avec le tracé vertical" end
+      done;;
+
+
+(*** les fonctions qui suivent sont utilisées pour déterminer la victoire du
+#> joueur sur un niveau ***)
+
+(*fonction récursive utilisant List.mem pour donner une liste sans doublons*)
+let rec liste_sans_doublons liste = match liste with
+   | [] -> []
+   | h :: t when List.mem h t -> liste_sans_doublons t
+   | h :: t -> h :: (liste_sans_doublons t);;
+
+(*prend en entrée un 'a array et donne un 'a list avec le même contenu*)
+let arraytoliste array =
+   let liste = ref ([]) and n = Array.length (array) in
+      for i = 0 to (n - 1) do
+         liste := array.(i) :: (!liste)
+      done;
+      !liste;;
+
+(* prend en entrée une liste de couples et sort le couple de listes correspondant*)
+let decouple listesize =
+   let n = List.length (listesize) in let listesizex = Array.make (n) (0, 0) and
+      listesizey = Array.make (n) (0, 0) in
+         for i = 0 to (n - 1) do
+            listesizex.(i) <- fst (List.nth (listesize) (i));
+            listesizey.(i) <- snd (List.nth (listesize) (i));
+         done; listesizex, listesizey;;
+(* prend en entrée un couple d'array et sort l'array de couples qui lui correspond*)
+let recoupler listesizex listesizey =
+   let n = Array.length (listesizex) in
+      let narray = Array.make (n) ((0, 0), (0, 0)) in
+         for i = 0 to n - 1 do
+            narray.(i) <- listesizex.(i), listesizey.(i)
+         done; narray;;
+
+(* calcule la surface d'une size à partir de ses coordonnées*)
+let surf listesizex listesizey
+i = (snd (listesizex.(i)) - fst (listesizex.(i))) * (snd (listesizey.(i)) - fst (listesizey.(i)));;
+(*calcule la surface totale occupées par des size disjointes dont les
+#> coordonnées sont données en entrée*)
+let surfdisj listesizex listesizey =
+   let surface = ref 0 in
+      for i = 0 to Array.length (listesizex) - 1 do
+         surface := !surface + surf (listesizex) (listesizey) (i) done;
+      (!surface);;
+
+(*calcule la surface occupée par toutes les size: comme l'intersection de deux
+#> size est soit vide, soit donne une des size, alors la surface totale est
+#> donnée par la somme des surfaces des size disjointes, obtenues en vidant la
+#> liste des couples (listesizex.(i),listesizey.(i)) de ses doublons*)
+let surfacerest listesizex listesizey =
+   let listesize = arraytoliste (recoupler listesizex listesizey) in
+      surfdisj (fst (decouple (liste_sans_doublons listesize)))
+      (snd (decouple (liste_sans_doublons listesize)));;
+
+(*La condition de gain au Jezzball est que la surface inutilisable représente
+#> au moins les 3/4 de la surface totale. Le pourcentage peut être modifié en
+#> argument de l'appel à conditiongain dans balles3_rebonds pour rajouter de la
+#> difficulté.*)
+let conditiongain surfacetotale surfacerestante pourcentage n x =
+   let a = ref false in
+      let pourcentageactuel = 100 * (surfacetotale - surfacerestante) / surfacetotale in
+         if pourcentageactuel >= pourcentage then a := true; !a;;
+
+
+(*Programme principal du jeu, utilisant tout ce qui a été écrit ci-dessus. 
+C'est un Jezzball à vie unique, donc un coup raté (i.e un contact entre une
+#> balle et un tracé non terminé) entraîne une défaite. Je note n le nombre de
+#> balles ("le niveau"), x la durée d'un "tic", et vitesse la valeur absolue de
+#> la vitesse de déplacement des balles (qui est donc constante comme au
+#> Jezzball). Les deux données x et vitesse sont à modifier s'il y a des
+#> problèmes d'affichage des balles, en sachant qu'on ne peut pas trop diminuer
+#> la durée d'un tic (sinon la fonction attend n'est plus fiable), donc cela est
+#> à équilibrer avec la vitesse (une vitesse trop grande réduit aussi la
+#> fluidité). Les valeurs que j'ai donné par défaut conviennent sur mon
+#> ordinateur, donc il me seble qu'elles devraient l'être aussi sur une autre
+#> machine, mais je précise cela au cas où ce n'est pas le cas.
+x=15. et vitesse = (2,2) produit une expérience de jeu quasi similaire, à
+#> tester en cas de problème avec la configuration par défaut. 
+
+Rappel des règles :
+Des balles (leur nombre augmente avec le niveau) rebondissent sur une zone de
+#> jeu rectangulaire. Le joueur avance au niveau suivant en enfermant les balles
+#> dans des espaces de plus en plus petits, jusqu'à ce qu'au moins 75% de la
+#> surface de la zone de jeu soit inaccessible aux balles. Pour enfermer les
+#> balles, le joueur peut tracer des droites verticales ou horizontales partant du
+#> point curseur et s'étendant avec une vitesse uniforme des deux côtés
+#> jusqu'à atteindre un bord. Si un tracé touche une balle durant son
+#> étalement, le joueur perd.
+Il n'y a en soit pas de "Victoire" possible hormis compléter le maximum de
+#> niveau, le jezzball originel contient aussi une limite de temps pour compléter
+#> le niveau et donne 3 vie au joueur mais cela n'a pas été considéré ici : le
+#> joueur a tout le temps qu'il lui faut pour compléter un niveau mais n'a en
+#> revanche qu'une seule vie pour y arriver.*)
+
+let rec balles3_rebonds n =
+   let x = 7.5 and vitesse = (1, 1) in
+      open_graph "600x400";
+      let mode1 = ref 0 in (* J'ai implémenté le changement de tracé par une variable
+#> binaire, qui est modifiée en cas d'appui sur une touche du clavier. Au départ
+#> on trace donc à l'horizontale, un appui sur une lettre du clavier (peu importe
+#> laquelle) change le mode pour un tracé vertical, un nouvel appui remet en mode
+#> horizontal etc...*)
+         let rec deplace listepos listevit listesizex listesizey =
+            if key_pressed () then begin incr (mode1) (*changement de mode*); let
+                  e = (wait_next_event [Key_pressed]).key in if e = 'e' then begin () end end;
+            (*L'appel à wait_next_event[Key_pressed] est le seul moyen que j'ai trouvé de
+#> reset le key_pressed(). Puisque les appui de touches sont stockés dans une
+#> queue, l'appel permet de libérer une place et donc de revenir à l'état
+#> initial qui est qu'aucune touche n'est appuyé. Le if e='e' est optionnel, sa
+#> seule utilité est de ne pas avoir d'erreur indiquant une variable inutilisée.
+#> Il peut être supprimé (ou maintenu, n'affecte pas le programme) après avoir
+#> pris connaissance de l'explication concernant l'appel à
+#> wait_next_event[Key_pressed].*)
+            if not (button_down ()) then begin (* si le joueur n'agit pas*)
+                  rebonds3 n listepos listevit listesizex listesizey;
+                  attend x;
+               end
+            else begin let j = ref 0 and r = mouse_pos () in let x1, y1 = r in (* si le joueur agit*)
+                        if !mode1 mod 2 = 0 then begin (*tracé horizontal*)
+                              let mini, maxi = fst (quellesize (x1) (y1) (listesizex) (listesizey)) in
+                                 while (x1 + (10 * (!j))) < (maxi + 5) do (*les décalages +5/-15
+#> dans toute la suite du programme sont là pour prendre en compte l'épaisseur
+#> des traits et/ou du rayon des balles*)
+                                    failY n x1 y1 j listepos listevit listesizex listesizey;
+                                    set_color (blue);
+                                    fill_rect (x1 + (10 * (!j))) (y1) (10) (10);
+                                    if (x1 - (10 * (!j))) > (mini - 15) then
+                                       (set_color (red);
+                                          fill_rect (x1 - (10 * (!j))) (y1) (10) (10));
+                                    incr (j);
+                                    rebonds3_NY n listepos listevit listesizex listesizey x1 y1;
+                                    attend (x);
+                                 done;
+                                 while (x1 - (10 * (!j))) > (mini - 15) do (*Dans le cas où le tracé
+#> vers la droite s'est terminé avant le tracé vers la gauche*)
+                                    failY n x1 y1 j listepos listevit listesizex listesizey;
+                                    set_color (red);
+                                    fill_rect (x1 - (10 * (!j))) (y1) (10) (10);
+                                    incr (j);
+                                    rebonds3_NY n listepos listevit listesizex listesizey x1 y1;
+                                    attend x; done
+                           end
+                        else begin (*si mode tracé vertical*)
+                              let mini, maxi = snd (quellesize (x1) (y1) (listesizex) (listesizey)) in
+                                 while (y1 + (10 * (!j))) < (maxi + 5) do
+                                    failX n x1 y1 j listepos listevit listesizex listesizey;
+                                    set_color (blue);
+                                    fill_rect (x1) (y1 + (10 * (!j))) (10) (10);
+                                    if (y1 - (10 * (!j))) > (mini - 15) then
+                                       (set_color (red);
+                                          fill_rect (x1) (y1 - (10 * (!j))) (10) (10));
+                                    incr (j);
+                                    rebonds3_NX n listepos listevit listesizex listesizey x1 y1;
+                                    attend (x);
+                                 done;
+                                 while (y1 - (10 * (!j))) > (mini - 15) do (*Pareil que dans le mode
+#> précédent, dans le cas où le tracé vers le haut s'est terminé avant le
+#> tracé vers le bas*)
+                                    failX n x1 y1 j listepos listevit listesizex listesizey;
+                                    set_color (red);
+                                    fill_rect (x1) (y1 - (10 * (!j))) (10) (10);
+                                    incr (j);
+                                    rebonds3_NY n listepos listevit listesizex listesizey x1 y1;
+                                    attend x; done end
+               end;
+            bords listesizex listesizey; (*noircit les bords. Rque :on peut remplacer
+#> bords par (fill_toutsaufsize) pour un noircissement total mais un clignotement
+#> permanent risquera d'apparaître, et les tracés déjà effectués seront
+#> simplement noircis du fait du fill noir à chaque itération*)
+            if conditiongain (size_x () * size_y ()) (surfacerest (listesizex)
+               (listesizey)) (75) (n) (x) then begin (*transition entre les niveaux en cas de
+#> victoire*)
+                  attend (0.5 *. 1e3);
+                  set_color (yellow);
+                  fill_rect (0) (0) (size_x ()) (size_y ());
+                  set_text_size (30);
+                  moveto (size_x () / 2 - 120) (size_y () / 2 + 30);
+                  attend (0.5 *. 1e3);
+                  set_color (black);
+                  draw_string "Niveau terminé!";
+                  moveto (25) (size_y () / 2 - 100);
+                  draw_string "...Chargement du niveau suivant...";
+                  attend 2e3;
+                  clear_graph ();
+                  balles3_rebonds (n + 1); end;
+            deplace listepos listevit listesizex listesizey;
+         in deplace (array_positions n) (array_vitesse n vitesse) (array_sizex n) (array_sizey n);;
+
+(* Programme de lancement du jeu incluant une page d'accueil*)
+let jezzball (n) =
+   open_graph "600x400";
+   set_color (red);
+   fill_rect (0) (0) (size_x ()) (size_y ());
+   moveto (120) (size_y () / 2);
+   set_color (yellow);
+   draw_string "Appuyez sur une touche pour débuter une partie...";
+   moveto (150) (size_y () / 2 - 20);
+   draw_string "Le jeu débute en mode tracé horizontal.";
+   while not (key_pressed ()) do () done;
+   let e = (wait_next_event [Key_pressed]).key in if e = 'e' then begin () end; (*
+#> permet de sortir de la queue de stockage des touches appuyées la touche sur
+#> laquelle le joueur appuie pour lancer la partie*)
+      clear_graph ();
+      balles3_rebonds (n);;
+
+jezzball (5);;(*Prend en entrée le niveau n>=1 avec lequel on veut débuter.
+#> Si le niveau n est réussi on passe directement au niveau n+1 même si on ne
+#> commence pas au niveau 1.
+Remarque : Le jeu a été programmé sur une fenêtre par défaut donc de
+#> "600x400" sur mon ordinateur, mais la résolution peut être changée et le jeu
+#> en mode plein écran est possible. Seul les drawstring au lancement du jeu et
+#> lors de la transition de niveau ne seront plus centrés car j'ai calibré cela
+#> sur du "600x400", mais à part ce détail visuel le jeu reste le même (si ce
+#> n'est que le jeu peut être un peu plus facile en mode plein écran quand le
+#> nombre de balles augmente).*)
+
+
+
+
+
+
+(****** Tentatives non encore abouties de noircissement des interstices sans passer
+#> par un fill sur tout sauf les size. Je voulais partir sur une idée de tri des
+#> size selon les x/y croissants puis combler les interstices au fur et à mesure
+#> mais je n'ai pas encore trouvé la manière de déterminer toutes les
+#> interstices. Les traces de quelques recherches effectuées sont laissées mais
+#> la fonction ne fait pas le encore le travail*****)
+
+let taillex listesize i = snd (fst (listesize.(i))) - fst (fst (listesize.(i)));;
+let tailley listesize i = snd (snd (listesize.(i))) - fst (snd (listesize.(i)));;
+
+let rec fstlistesize listesize = match listesize with
+   | [] -> []
+   | h :: t -> fst (h) :: (fstlistesize t);;
+
+let rec sndlistesize listesize = match listesize with
+   | [] -> []
+   | h :: t -> snd (h) :: (fstlistesize t);;
+
+fstlistesize [(1, 2); (3, 4)];;
+
+let rec division liste =
+   match liste with
+   | [] -> [], []
+   | a :: [] -> liste, []
+   | a :: b :: c ->
+      let (l1, l2) = division c in
+         a :: l1, b :: l2;;
+
+let rec fusion liste1 liste2 =
+   match liste1, liste2 with
+   | [], _ -> liste2;
+   | _, [] -> liste1;
+   | t1 :: q1, t2 :: q2 ->
+      if t1 < t2 then
+         t1 :: (fusion q1 liste2)
+      else
+         t2 :: (fusion liste1 q2);;
+
+let rec tri_fusion liste =
+   match liste with
+   | [] -> [];
+   | a :: [] -> liste;
+   | _ ->
+      begin
+         let (liste1, liste2) = division liste in
+            fusion (tri_fusion (liste1)) (tri_fusion (liste2));
+      end;;
+
+let fill_extremessize listesizex listesizey =
+   let listesize = (liste_sans_doublons (arraytoliste (recoupler listesizex listesizey))) in
+      let n = List.length (listesize) in
+         let fstlistex = listetoarray (tri_fusion (fstlistesize (fstlistesize
+                     (listesize)))) and fstlistey = listetoarray (tri_fusion (fstlistesize
+                  (sndlistesize (listesize)))) in
+            set_color (black);
+            for i = 0 to (n - 1) do
+               fill_rect (0) (0) (fstlistex.(i)) (size_y ());
+               fill_rect (0) (0) (size_x ()) (fstlistey.(i)) done;;
