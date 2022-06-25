@@ -1,4 +1,4 @@
-Règles du jeu (inspiré grandement du Jezzball) :
+Règles du jeu :
 
 
 Des balles (leur nombre augmente avec le niveau) rebondissent sur une zone de jeu rectangulaire. Le joueur avance au niveau suivant en enfermant les balles dans des espaces de plus en plus petits, jusqu'à ce qu'au moins 75% de la surface de la zone de jeu soit inaccessible aux balles. 
